@@ -5,6 +5,8 @@
 #include "Runtime/Core/Public/Async/TaskGraphInterfaces.h"
 #include "Runtime/Core/Public/Containers/Ticker.h"
 #include "Runtime/Launch/Resources/Version.h"
+#include "Misc/FileHelper.h"
+
 #include <string>
 #include <fstream>
 
@@ -26,24 +28,11 @@ static void ReadTestsFromFile(const FString& InFile, TArray<FAutomationTestInfo>
 {
 	TSet<FString> TestCommands;
 
-	// Wrapping in an inner scope to ensure automatic destruction of InStream object without explicitly calling .close().
-	{
-		std::wifstream InStream(*InFile);
-		if (!InStream.good())
-		{
-			UE_LOG(LogVisualStudioTools, Error, TEXT("Failed to open file at path: %s"), *InFile);
-			return;
+	FFileHelper::LoadFileToStringWithLineVisitor(*InFile, [&](FStringView Line) {
+		if (Line.Len() > 0) {
+			TestCommands.Emplace(Line);
 		}
-
-		std::wstring Line;
-		while (std::getline(InStream, Line))
-		{
-			if (Line.length() > 0)
-			{
-				TestCommands.Add(FString(Line.c_str()));
-			}
-		}
-	}
+	});
 
 	GetAllTests(OutTestList);
 	for (int32 Idx = OutTestList.Num() - 1; Idx >= 0; Idx--)
@@ -57,18 +46,14 @@ static void ReadTestsFromFile(const FString& InFile, TArray<FAutomationTestInfo>
 
 static int32 ListTests(const FString& TargetFile)
 {
-	std::wofstream OutFile(*TargetFile);
-	if (!OutFile.good())
-	{
-		UE_LOG(LogVisualStudioTools, Error, TEXT("Failed to open file at path: %s"), *TargetFile);
-		return 1;
-	}
-
 	FAutomationTestFramework& Framework = FAutomationTestFramework::GetInstance();
 
 	TArray<FAutomationTestInfo> TestInfos;
 	GetAllTests(TestInfos);
 
+	UE_LOG(LogVisualStudioTools, Display, TEXT("Found %d tests"), TestInfos.Num());
+
+	TArray<FString> Lines;
 	for (const auto& TestInfo : TestInfos)
 	{
 		const FString TestCommand = TestInfo.GetTestName();
@@ -76,24 +61,19 @@ static int32 ListTests(const FString& TargetFile)
 		const FString SourceFile = TestInfo.GetSourceFile();
 		const int32 Line = TestInfo.GetSourceFileLine();
 
-		OutFile << *TestCommand << TEXT("|") << *DisplayName << TEXT("|") << Line << TEXT("|") << *SourceFile << std::endl;
+		Lines.Add(FString::Printf(TEXT("%s|%s|%d|%s"), *TestCommand, *DisplayName, Line, *SourceFile));
 	}
-
-	UE_LOG(LogVisualStudioTools, Display, TEXT("Found %d tests"), TestInfos.Num());
-	OutFile.close();
-
+	const bool bWroteFile = FFileHelper::SaveStringArrayToFile(Lines, *TargetFile, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+	if (!bWroteFile)
+	{
+		UE_LOG(LogVisualStudioTools, Error, TEXT("Failed to write file at path: %s"), *TargetFile);
+		return 1;
+	}
 	return 0;
 }
 
 static int32 RunTests(const FString& TestListFile, const FString& ResultsFile)
 {
-	std::wofstream OutFile(*ResultsFile);
-	if (!OutFile.good())
-	{
-		UE_LOG(LogVisualStudioTools, Error, TEXT("Failed to open file at path: %s"), *ResultsFile);
-		return 1;
-	}
-
 	TArray<FAutomationTestInfo> TestInfos;
 	if (TestListFile.Equals(TEXT("All"), ESearchCase::IgnoreCase))
 	{
@@ -108,6 +88,7 @@ static int32 RunTests(const FString& TestListFile, const FString& ResultsFile)
 
 	FAutomationTestFramework& Framework = FAutomationTestFramework::GetInstance();
 
+	TArray<FString> Lines;
 	for (const FAutomationTestInfo& TestInfo : TestInfos)
 	{
 		const FString TestCommand = TestInfo.GetTestName();
@@ -145,7 +126,7 @@ static int32 RunTests(const FString& TestListFile, const FString& ResultsFile)
 		const FString Result = CurrentTestSuccessful ? TEXT("OK") : TEXT("FAIL");
 
 		// [RUNTEST] is part of the protocol, so do not remove.
-		OutFile << TEXT("[RUNTEST]") << *TestCommand << TEXT("|") << *DisplayName << TEXT("|") << *Result << TEXT("|") << ExecutionInfo.Duration << std::endl;
+		Lines.Add(FString::Printf(TEXT("[RUNTEST]%s|%s|%s|%f"), *TestCommand, *DisplayName, *Result, ExecutionInfo.Duration));
 
 		if (!CurrentTestSuccessful)
 		{
@@ -153,7 +134,7 @@ static int32 RunTests(const FString& TestListFile, const FString& ResultsFile)
 			{
 				if (Entry.Event.Type == EAutomationEventType::Error)
 				{
-					OutFile << *Entry.Event.Message << std::endl;
+					Lines.Add(Entry.Event.Message);
 					UE_LOG(LogVisualStudioTools, Error, TEXT("%s"), *Entry.Event.Message);
 				}
 			}
@@ -161,7 +142,13 @@ static int32 RunTests(const FString& TestListFile, const FString& ResultsFile)
 			UE_LOG(LogVisualStudioTools, Log, TEXT("Failed  %s"), *DisplayName);
 		}
 
-		OutFile.flush();
+	}
+
+	const bool bWroteFile = FFileHelper::SaveStringArrayToFile(Lines, *ResultsFile, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+	if (!bWroteFile)
+	{
+		UE_LOG(LogVisualStudioTools, Error, TEXT("Failed to open file at path: %s"), *ResultsFile);
+		return 1;
 	}
 
 	return AllSuccessful ? 0 : 1;
